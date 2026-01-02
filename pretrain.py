@@ -16,7 +16,14 @@ import coolname
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"[*] Usando dispositivo: {DEVICE}")
+
+try:
+    from adam_atan2 import AdamATan2
+except (ImportError, ModuleNotFoundError):
+    AdamATan2 = None
+    print("[!] AdamATan2 backend not found. Fallback to AdamW will be used.")
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
@@ -121,7 +128,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     model_cls = load_model_class(config.arch.name)
     loss_head_cls = load_model_class(config.arch.loss.name)
 
-    with torch.device("cuda"):
+    with torch.device(DEVICE):
         model: nn.Module = model_cls(model_cfg)
         model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
         if "DISABLE_COMPILE" not in os.environ:
@@ -143,7 +150,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
 
             world_size=world_size
         ),
-        AdamATan2(
+        (AdamATan2 if AdamATan2 is not None else torch.optim.AdamW)(
             model.parameters(),
 
             lr=0,  # Needs to be set by scheduler
@@ -212,16 +219,20 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         return
 
     # To device
-    batch = {k: v.cuda() for k, v in batch.items()}
+    print(f"[DEBUG] Movendo batch para {DEVICE}...")
+    batch = {k: v.to(DEVICE) for k, v in batch.items()}
 
     # Init carry if it is None
     if train_state.carry is None:
-        with torch.device("cuda"):
+        print(f"[DEBUG] Inicializando carry do modelo...")
+        with torch.device(DEVICE):
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
     # Forward
+    print(f"[DEBUG] Executando forward pass...")
     train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
 
+    print(f"[DEBUG] Executando backward pass...")
     ((1 / global_batch_size) * loss).backward()
 
     # Allreduce
@@ -276,8 +287,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         carry = None
         for set_name, batch, global_batch_size in eval_loader:
             # To device
-            batch = {k: v.cuda() for k, v in batch.items()}
-            with torch.device("cuda"):
+            batch = {k: v.to(DEVICE) for k, v in batch.items()}
+            with torch.device(DEVICE):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
             # Forward
@@ -300,7 +311,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
             
             if metric_values is None:
                 metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda")
+                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device=DEVICE)
                 
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
             metric_global_batch_size[set_id] += global_batch_size
@@ -415,6 +426,10 @@ def launch(hydra_config: DictConfig):
     if RANK == 0:
         progress_bar = tqdm.tqdm(total=train_state.total_steps)
 
+        if not os.getenv("WANDB_API_KEY"):
+            os.environ["WANDB_MODE"] = "offline"
+            print("[*] WANDB_API_KEY não encontrada. Operando em modo OFFLINE.")
+
         wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
         wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
         save_code_and_config(config)
@@ -424,11 +439,20 @@ def launch(hydra_config: DictConfig):
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
 
         ############ Train Iter
+        print(f"[DEBUG] Iniciando loop de treinamento para época {_iter_id * train_epochs_per_iter}...")
         train_state.model.train()
+        batch_idx = 0
         for set_name, batch, global_batch_size in train_loader:
+            batch_idx += 1
+            print(f"[DEBUG] Processando batch {batch_idx} (set: {set_name}, batch_size: {global_batch_size})...")
             metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
+                # Log explicitamente para visibilidade
+                loss_val = metrics.get('train/token_loss', 0.0)
+                progress_pct = (train_state.step / train_state.total_steps) * 100
+                print(f"✅ [STEP {train_state.step}/{train_state.total_steps}] Loss: {loss_val:.4f} | Progress: {progress_pct:.1f}%")
+                
                 wandb.log(metrics, step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
 

@@ -1,0 +1,1 @@
+public class L2ItemInstance { private int _itemId; public int getItemId() { return _itemId; } }

@@ -17,7 +17,10 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.23.1",
     "flash-attn>=2.0.0",
+    "openai>=1.0.0",
 ]
 
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch", "packaging", "ninja", "wheel", "setuptools", "setuptools-scm"]
+
+[tool.uv]
+managed = true
+

@@ -1,0 +1,1 @@
+public class L2Character { private String _name; public String getName() { return _name; } }

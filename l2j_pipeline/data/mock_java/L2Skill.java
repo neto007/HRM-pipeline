@@ -1,0 +1,1 @@
+public abstract class L2Skill { protected int _id; public abstract void use(); }
