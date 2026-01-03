@@ -61,6 +61,13 @@ class AutoTrainRequest(BaseModel):
     branch: str = "master"
     file_extensions: List[str] = [".java"]
 
+class HuggingFaceUploadRequest(BaseModel):
+    repo_id: str
+    token: str
+    private: bool = False
+    latest_only: bool = True
+
+
 @app.get("/projects")
 async def list_projects():
     return load_projects()
@@ -300,7 +307,8 @@ async def clone_and_train(req: AutoTrainRequest, background_tasks: BackgroundTas
         "--batch-size", str(req.batch_size),
         "--branch", req.branch,
         "--output", f"data/projects/{req.project_name}",
-        "--exts", ",".join(req.file_extensions)
+        "--exts", ",".join(req.file_extensions),
+        "--project-name", req.project_name  # ✅ Passar nome do projeto
     ]
     
     f = open(log_file, "w")
@@ -383,30 +391,296 @@ async def resume_project(project_name: str):
 
 @app.delete("/projects/{project_name}")
 async def delete_project(project_name: str):
+    """Remove projeto completamente: processo, arquivos, checkpoints e config."""
+    import shutil
+    
     # 1. Stop if running
     pid = active_processes.get(project_name)
     if pid:
-        try: os.kill(pid, signal.SIGKILL)
-        except: pass
+        try: 
+            os.kill(pid, signal.SIGKILL)
+            print(f"[Delete] ✓ Processo {pid} terminado")
+        except: 
+            pass
         del active_processes[project_name]
     
-    # 2. Remove files
+    # 2. Remove project data
     proj_dir = f"data/projects/{project_name}"
-    log_file = f"data/logs/{project_name}.log"
-    
-    import shutil
     if os.path.exists(proj_dir):
         shutil.rmtree(proj_dir)
+        print(f"[Delete] ✓ Removido: {proj_dir}")
+    
+    # 3. Remove logs
+    log_file = f"data/logs/{project_name}.log"
     if os.path.exists(log_file):
         os.remove(log_file)
+        print(f"[Delete] ✓ Removido: {log_file}")
+    
+    # 4. Remove checkpoints (usando match flexível como no download)
+    checkpoint_base = "checkpoints"
+    checkpoints_removed = 0
+    
+    if os.path.exists(checkpoint_base):
+        project_key = project_name.lower().split('-')[0]
         
-    # 3. Remove from config
+        for dirname in os.listdir(checkpoint_base):
+            dirname_lower = dirname.lower()
+            
+            # Match flexível (mesma lógica do download)
+            if (project_name.lower() in dirname_lower or 
+                project_key in dirname_lower or
+                dirname_lower.startswith(project_key)):
+                
+                checkpoint_path = os.path.join(checkpoint_base, dirname)
+                if os.path.isdir(checkpoint_path):
+                    # Calcular tamanho antes de remover
+                    size_mb = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                  for dirpath, dirnames, filenames in os.walk(checkpoint_path)
+                                  for filename in filenames) / (1024 * 1024)
+                    
+                    shutil.rmtree(checkpoint_path)
+                    checkpoints_removed += 1
+                    print(f"[Delete] ✓ Removido checkpoint: {dirname} ({size_mb:.1f} MB)")
+    
+    # 5. Remove from config
     projects = load_projects()
     if project_name in projects:
         del projects[project_name]
         save_projects(projects)
+        print(f"[Delete] ✓ Removido do config")
+    
+    return {
+        "message": f"Projeto {project_name} excluído completamente",
+        "checkpoints_removed": checkpoints_removed
+    }
+
+# ==================== Download / Upload ====================
+from fastapi.responses import FileResponse
+import shutil
+
+@app.get("/projects/{project_name}/download")
+async def download_project(project_name: str):
+    """Compacta o projeto (dados + checkpoints) e retorna o ZIP."""
+    import tempfile
+    
+    proj_dir = f"data/projects/{project_name}"
+    checkpoint_base = "checkpoints"
+    
+    # Verificar se existe projeto OU checkpoints
+    has_project_data = os.path.exists(proj_dir)
+    has_checkpoints = False
+    
+    # Buscar checkpoints relacionados ao projeto
+    # Match mais flexível: parte do nome do projeto ou vice-versa
+    if os.path.exists(checkpoint_base):
+        for dirname in os.listdir(checkpoint_base):
+            # Extrair primeira parte do nome (antes do hífen ou maiúsculas)
+            # l2j-server-game -> procura por "l2j"
+            # L2J-Auto-Train contém "l2j"
+            project_key = project_name.lower().split('-')[0]  # "l2j"
+            dirname_lower = dirname.lower()
+            
+            # Match se:
+            # 1. Nome do projeto está no dirname
+            # 2. Primeira parte do projeto está no dirname  
+            # 3. dirname começa com primeira parte do projeto
+            if (project_name.lower() in dirname_lower or 
+                project_key in dirname_lower or
+                dirname_lower.startswith(project_key)):
+                if os.path.isdir(os.path.join(checkpoint_base, dirname)):
+                    has_checkpoints = True
+                    print(f"[Download Check] Checkpoint encontrado: {dirname}")
+                    break
+    
+    if not has_project_data and not has_checkpoints:
+        raise HTTPException(status_code=404, detail=f"Projeto {project_name} não encontrado (sem dados e sem checkpoints)")
+    
+    # Criar diretório temporário para montar estrutura
+    os.makedirs("data/temp_export", exist_ok=True)
+    temp_dir = tempfile.mkdtemp(dir="data/temp_export")
+    
+    try:
+        # Copiar data/projects/{name} se existir
+        if has_project_data:
+            shutil.copytree(proj_dir, os.path.join(temp_dir, "data"))
+            print(f"[Download] Incluindo dados do projeto: {proj_dir}")
         
-    return {"message": f"Projeto {project_name} excluído com sucesso"}
+        # Copiar checkpoints se existirem
+        checkpoint_found = False
+        if os.path.exists(checkpoint_base):
+            # Usar a MESMA lógica de match que usamos acima
+            project_key = project_name.lower().split('-')[0]
+            
+            for dirname in os.listdir(checkpoint_base):
+                dirname_lower = dirname.lower()
+                
+                # Match flexível (mesma lógica da verificação)
+                if (project_name.lower() in dirname_lower or 
+                    project_key in dirname_lower or
+                    dirname_lower.startswith(project_key)):
+                    source_path = os.path.join(checkpoint_base, dirname)
+                    if os.path.isdir(source_path):
+                        checkpoint_dest = os.path.join(temp_dir, "checkpoints")
+                        os.makedirs(checkpoint_dest, exist_ok=True)
+                        print(f"[Download] Copiando checkpoint: {dirname} ({os.path.getsize(source_path)} bytes)")
+                        shutil.copytree(source_path, os.path.join(checkpoint_dest, dirname))
+                        checkpoint_found = True
+                        print(f"[Download] ✓ Checkpoint incluído: {dirname}")
+        
+        # Criar README informativo
+        readme_content = f"""# HRM Project Export: {project_name}
+
+## Contents:
+- Project Data: {'✓ Included' if has_project_data else '✗ Not available yet (training in progress)'}
+- Checkpoints: {'✓ Included' if checkpoint_found else '✗ Not found'}
+
+## Instructions:
+1. Extract this ZIP to your HRM-pipeline directory
+2. If checkpoints are included, they will be in checkpoints/
+3. If project data is included, it will be in data/projects/{project_name}/
+
+Generated: {os.popen('date').read().strip()}
+"""
+        with open(os.path.join(temp_dir, "README.txt"), "w") as f:
+            f.write(readme_content)
+        
+        # Criar ZIP
+        zip_base_name = f"data/temp_export/{project_name}_complete"
+        shutil.make_archive(zip_base_name, 'zip', temp_dir)
+        zip_file = f"{zip_base_name}.zip"
+        
+        return FileResponse(
+            zip_file, 
+            media_type='application/zip', 
+            filename=f"{project_name}_complete.zip",
+            headers={
+                "X-Checkpoints-Included": str(checkpoint_found),
+                "X-Project-Data-Included": str(has_project_data)
+            }
+        )
+    finally:
+        # Limpar temp_dir
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+from fastapi import UploadFile, File
+
+@app.post("/projects/upload")
+async def upload_project(file: UploadFile = File(...)):
+    """Recebe um ZIP de projeto e o restaura."""
+    try:
+        project_name = file.filename.replace(".zip", "")
+        # Sanitize filename
+        project_name = "".join([c for c in project_name if c.isalnum() or c in ('-', '_')])
+        
+        target_dir = f"data/projects/{project_name}"
+        if os.path.exists(target_dir):
+             raise HTTPException(status_code=400, detail=f"Projeto {project_name} já existe")
+             
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # Save zip temp
+        temp_zip = f"data/temp_upload_{project_name}.zip"
+        with open(temp_zip, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        # Extract
+        shutil.unpack_archive(temp_zip, target_dir)
+        os.remove(temp_zip)
+        
+        # Register in projects.json (minimal info)
+        projects = load_projects()
+        projects[project_name] = {
+            "repo": "Uploaded",
+            "epochs": 0,
+            "status": "finished",
+            "extensions": []
+        }
+        save_projects(projects)
+        
+        return {"message": f"Projeto {project_name} importado com sucesso", "project": project_name}
+        
+    except Exception as e:
+        print(f"Error upload: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro no upload: {str(e)}")
+
+
+# ==================== Hugging Face Upload ====================
+
+@app.post("/projects/{project_name}/upload-hf")
+async def upload_to_huggingface(project_name: str, req: HuggingFaceUploadRequest, background_tasks: BackgroundTasks):
+    """Faz upload do modelo treinado para Hugging Face Hub."""
+    
+    # Verificar se projeto existe
+    projects = load_projects()
+    if project_name not in projects:
+        raise HTTPException(status_code=404, detail=f"Projeto {project_name} não encontrado")
+    
+    # Verificar se checkpoint existe
+    checkpoint_base = f"checkpoints/{project_name}"
+    if not os.path.exists(checkpoint_base):
+        raise HTTPException(status_code=404, detail=f"Checkpoints não encontrados para {project_name}")
+    
+    log_file = f"data/logs/{project_name}_hf_upload.log"
+    os.makedirs("data/logs", exist_ok=True)
+    
+    def run_upload():
+        """Executa upload em background."""
+        try:
+            cmd = [
+                ".venv/bin/python", "upload_to_huggingface.py",
+                "--project", project_name,
+                "--repo-id", req.repo_id,
+                "--token", req.token
+            ]
+            
+            if req.private:
+                cmd.append("--private")
+            
+            if req.latest_only:
+                cmd.append("--latest-only")
+            
+            print(f"[HF Upload] Iniciando upload de {project_name} para {req.repo_id}")
+            
+            with open(log_file, "w") as f:
+                process = subprocess.run(
+                    cmd,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                
+            if process.returncode == 0:
+                print(f"[HF Upload] ✅ Upload concluído: {req.repo_id}")
+            else:
+                print(f"[HF Upload] ❌ Upload falhou com código {process.returncode}")
+                
+        except Exception as e:
+            print(f"[HF Upload] ❌ Erro: {e}")
+            with open(log_file, "a") as f:
+                f.write(f"\n\nERRO: {str(e)}")
+    
+    background_tasks.add_task(run_upload)
+    
+    return {
+        "message": f"Upload para Hugging Face iniciado",
+        "project": project_name,
+        "repo_id": req.repo_id,
+        "log_file": log_file
+    }
+
+@app.get("/projects/{project_name}/upload-hf/logs")
+async def get_hf_upload_logs(project_name: str):
+    """Retorna logs do upload para Hugging Face."""
+    log_file = f"data/logs/{project_name}_hf_upload.log"
+    
+    if not os.path.exists(log_file):
+        return {"logs": "Aguardando início do upload..."}
+    
+    with open(log_file, "r") as f:
+        lines = f.readlines()
+        return {"logs": "".join(lines[-100:])}  # Últimas 100 linhas
+
 
 if __name__ == "__main__":
     import uvicorn

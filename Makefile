@@ -29,7 +29,7 @@ frontend: ## Inicia apenas o frontend (Vite dev server)
 backend: ## Inicia apenas o backend (FastAPI)
 	@echo "$(CYAN)⚙️  Iniciando Backend API...$(NC)"
 	@echo "$(YELLOW)👉 Rodando em: http://127.0.0.1:9007$(NC)"
-	.venv/bin/python -u l2j_pipeline/api.py
+	.venv/bin/python -m l2j_pipeline.api
 
 dev: ## Inicia frontend e backend simultaneamente
 	@echo "$(CYAN)🚀 Iniciando HRM Forge completo...$(NC)"
