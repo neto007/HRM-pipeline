@@ -488,66 +488,86 @@ async def resume_project(project_name: str):
 async def delete_project(project_name: str):
     """Remove projeto completamente: processo, arquivos, checkpoints e config."""
     import shutil
-    
-    # 1. Stop if running
-    pid = active_processes.get(project_name)
-    if pid:
-        try: 
-            os.kill(pid, signal.SIGKILL)
-            print(f"[Delete] ✓ Processo {pid} terminado")
-        except: 
-            pass
-        del active_processes[project_name]
-    
-    # 2. Remove project data
-    proj_dir = f"data/projects/{project_name}"
-    if os.path.exists(proj_dir):
-        shutil.rmtree(proj_dir)
-        print(f"[Delete] ✓ Removido: {proj_dir}")
-    
-    # 3. Remove logs
-    log_file = f"data/logs/{project_name}.log"
-    if os.path.exists(log_file):
-        os.remove(log_file)
-        print(f"[Delete] ✓ Removido: {log_file}")
-    
-    # 4. Remove checkpoints (usando match flexível como no download)
-    checkpoint_base = "checkpoints"
-    checkpoints_removed = 0
-    
-    if os.path.exists(checkpoint_base):
-        project_key = project_name.lower().split('-')[0]
+    import traceback
+
+    try:
+        # 1. Stop if running
+        pid = active_processes.get(project_name)
+        if pid:
+            try: 
+                os.kill(pid, signal.SIGKILL)
+                print(f"[Delete] ✓ Processo {pid} terminado")
+            except: 
+                pass
+            del active_processes[project_name]
         
-        for dirname in os.listdir(checkpoint_base):
-            dirname_lower = dirname.lower()
+        # 2. Remove project data
+        proj_dir = f"data/projects/{project_name}"
+        if os.path.exists(proj_dir):
+            try:
+                shutil.rmtree(proj_dir)
+                print(f"[Delete] ✓ Removido: {proj_dir}")
+            except Exception as e:
+                print(f"[Delete] ⚠️ Falha ao remover diretório do projeto: {e}")
+        
+        # 3. Remove logs
+        log_file = f"data/logs/{project_name}.log"
+        if os.path.exists(log_file):
+            try:
+                os.remove(log_file)
+                print(f"[Delete] ✓ Removido: {log_file}")
+            except Exception as e:
+                print(f"[Delete] ⚠️ Falha ao remover log: {e}")
+        
+        # 4. Remove checkpoints (usando match flexível como no download)
+        checkpoint_base = "checkpoints"
+        checkpoints_removed = 0
+        
+        if os.path.exists(checkpoint_base):
+            project_key = project_name.lower().split('-')[0]
             
-            # Match flexível (mesma lógica do download)
-            if (project_name.lower() in dirname_lower or 
-                project_key in dirname_lower or
-                dirname_lower.startswith(project_key)):
+            for dirname in os.listdir(checkpoint_base):
+                dirname_lower = dirname.lower()
                 
-                checkpoint_path = os.path.join(checkpoint_base, dirname)
-                if os.path.isdir(checkpoint_path):
-                    # Calcular tamanho antes de remover
-                    size_mb = sum(os.path.getsize(os.path.join(dirpath, filename))
-                                  for dirpath, dirnames, filenames in os.walk(checkpoint_path)
-                                  for filename in filenames) / (1024 * 1024)
+                # Match flexível (mesma lógica do download)
+                if (project_name.lower() in dirname_lower or 
+                    project_key in dirname_lower or
+                    dirname_lower.startswith(project_key)):
                     
-                    shutil.rmtree(checkpoint_path)
-                    checkpoints_removed += 1
-                    print(f"[Delete] ✓ Removido checkpoint: {dirname} ({size_mb:.1f} MB)")
-    
-    # 5. Remove from config
-    projects = load_projects()
-    if project_name in projects:
-        del projects[project_name]
-        save_projects(projects)
-        print(f"[Delete] ✓ Removido do config")
-    
-    return {
-        "message": f"Projeto {project_name} excluído completamente",
-        "checkpoints_removed": checkpoints_removed
-    }
+                    checkpoint_path = os.path.join(checkpoint_base, dirname)
+                    if os.path.isdir(checkpoint_path):
+                        # Calcular tamanho antes de remover (protegido)
+                        size_mb = 0
+                        try:
+                            size_mb = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                        for dirpath, dirnames, filenames in os.walk(checkpoint_path)
+                                        for filename in filenames) / (1024 * 1024)
+                        except Exception:
+                            pass # Ignorar erro de cálculo de tamanho
+                        
+                        try:
+                            shutil.rmtree(checkpoint_path)
+                            checkpoints_removed += 1
+                            print(f"[Delete] ✓ Removido checkpoint: {dirname} ({size_mb:.1f} MB)")
+                        except Exception as e:
+                            print(f"[Delete] ⚠️ Falha ao remover checkpoint {dirname}: {e}")
+        
+        # 5. Remove from config
+        projects = load_projects()
+        if project_name in projects:
+            del projects[project_name]
+            save_projects(projects)
+            print(f"[Delete] ✓ Removido do config")
+        
+        return {
+            "message": f"Projeto {project_name} excluído completamente",
+            "checkpoints_removed": checkpoints_removed
+        }
+
+    except Exception as e:
+        print(f"❌ Erro crítico ao deletar projeto {project_name}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Erro ao deletar projeto: {str(e)}")
 
 # ==================== Download / Upload ====================
 from fastapi.responses import FileResponse

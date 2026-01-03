@@ -1,1 +1,10 @@
-{}
+{
+  "L2j": {
+    "repo": "https://bitbucket.org/l2jserver/l2j-server-login.git",
+    "epochs": 50,
+    "status": "training",
+    "extensions": [
+      "AUTO"
+    ]
+  }
+}

@@ -219,21 +219,21 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         return
 
     # To device
-    print(f"[DEBUG] Movendo batch para {DEVICE}...")
     batch = {k: v.to(DEVICE) for k, v in batch.items()}
+
 
     # Init carry if it is None
     if train_state.carry is None:
-        print(f"[DEBUG] Inicializando carry do modelo...")
+
         with torch.device(DEVICE):
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
     # Forward
-    print(f"[DEBUG] Executando forward pass...")
+    # Forward
     train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
 
-    print(f"[DEBUG] Executando backward pass...")
     ((1 / global_batch_size) * loss).backward()
+
 
     # Allreduce
     if world_size > 1:
@@ -436,22 +436,28 @@ def launch(hydra_config: DictConfig):
 
     # Training Loop
     for _iter_id in range(total_iters):
-        print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
+        if RANK == 0:
+            tqdm.tqdm.write(f"[*] Epoch {_iter_id * train_epochs_per_iter}")
+
+
 
         ############ Train Iter
-        print(f"[DEBUG] Iniciando loop de treinamento para época {_iter_id * train_epochs_per_iter}...")
+        ############ Train Iter
+
         train_state.model.train()
         batch_idx = 0
         for set_name, batch, global_batch_size in train_loader:
             batch_idx += 1
-            print(f"[DEBUG] Processando batch {batch_idx} (set: {set_name}, batch_size: {global_batch_size})...")
+
             metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
-                # Log explicitamente para visibilidade
+                # Restaurando logs detalhados (solicitado pelo usuário)
                 loss_val = metrics.get('train/token_loss', 0.0)
                 progress_pct = (train_state.step / train_state.total_steps) * 100
-                print(f"✅ [STEP {train_state.step}/{train_state.total_steps}] Loss: {loss_val:.4f} | Progress: {progress_pct:.1f}%")
+                
+                # Usar tqdm.write para manter o log persistente e "bonito" no dashboard
+                tqdm.tqdm.write(f"✅ [STEP {train_state.step}/{train_state.total_steps}] Loss: {loss_val:.4f} | Progress: {progress_pct:.1f}%")
                 
                 wandb.log(metrics, step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
