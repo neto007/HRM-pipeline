@@ -20,6 +20,49 @@ async def get_migration_plan():
     """Retorna o plano de migração (dependências e ordem)."""
     return load_migration_plan_data()
 
+@router.get("/checkpoints")
+async def list_checkpoints():
+    """Lista todos os checkpoints disponíveis na pasta checkpoints/."""
+    base_dir = "checkpoints"
+    results = []
+    
+    if os.path.exists(base_dir):
+        # Structure is checkpoints/{project_name}/{run_name}/step_X
+        for project in os.listdir(base_dir):
+            if project.startswith('.'): continue
+            
+            project_path = os.path.join(base_dir, project)
+            if not os.path.isdir(project_path): continue
+            
+            for run_name in os.listdir(project_path):
+                if run_name.startswith('.'): continue
+                run_path = os.path.join(project_path, run_name)
+                if not os.path.isdir(run_path): continue
+                
+                # Check for "step_*" files
+                files = os.listdir(run_path)
+                steps = [f for f in files if f.startswith("step_") and not f.endswith(".yaml")]
+                
+                # Also check for "last" or "best" if they exist (custom naming)
+                
+                for step in steps:
+                    # Extract epoch/step number if possible
+                    step_num = step.replace("step_", "")
+                    
+                    results.append({
+                        "name": f"{project}/{run_name}/{step}",
+                        "path": os.path.join(run_path, step),
+                        "project": project,
+                        "run": run_name,
+                        "epoch": step_num,
+                        "valid": True,
+                        "is_default": False
+                    })
+
+    # Sort by project and run
+    results.sort(key=lambda x: (x['project'], x['run'], x['epoch']), reverse=True)
+    return results
+
 @router.post("/generate")
 async def generate_dataset(req: GenerateRequest, background_tasks: BackgroundTasks):
     """Inicia a geração usando HybridMigrationEngine (HRM+LLM+RLCoder)."""

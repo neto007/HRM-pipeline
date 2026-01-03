@@ -78,10 +78,24 @@ function App() {
     if (activeTab === 'migration') {
       fetchMigrationPlan();
       fetchDataset();
+      fetchCheckpoints();
       const interval = setInterval(fetchDataset, 5000); // Poll dataset changes
       return () => clearInterval(interval);
     }
   }, [activeTab]);
+
+  const fetchCheckpoints = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/migration/checkpoints`);
+      setHrmCheckpoints(res.data);
+      // Auto-select first if available
+      if (res.data.length > 0 && selectedCheckpoint === 'default') {
+        setSelectedCheckpoint(res.data[0].path);
+      }
+    } catch (e) {
+      console.error("Failed to fetch checkpoints", e);
+    }
+  };
 
   const fetchProjects = async () => {
     try {

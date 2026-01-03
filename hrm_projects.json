@@ -1,10 +1,1 @@
-{
-  "l2j-server-game": {
-    "repo": "https://bitbucket.org/l2jserver/l2j-server-game.git",
-    "epochs": 500,
-    "status": "training",
-    "extensions": [
-      "AUTO"
-    ]
-  }
-}
+{}

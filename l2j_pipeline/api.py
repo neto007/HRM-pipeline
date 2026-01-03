@@ -5,6 +5,7 @@ import subprocess
 import os
 import signal
 import torch
+import psutil
 from typing import List, Optional
 
 import json
@@ -26,6 +27,38 @@ def save_projects(projects):
     with open(PROJECTS_FILE, "w") as f:
         json.dump(projects, f, indent=2)
 
+# Global process tracking
+active_processes = {}
+
+def sync_project_status():
+    """Syncs the in-memory active_processes with the persisted projects.json"""
+    projects = load_projects()
+    changed = False
+    
+    # 1. Clean up dead processes from active_processes
+    # Copy keys to allow modification during iteration
+    for pname, pid in list(active_processes.items()):
+        try:
+            if pid:
+                os.kill(pid, 0) # Check if process is alive
+        except OSError:
+            # Process died
+            del active_processes[pname]
+    
+    # 2. Update projects status based on reality
+    for name, data in projects.items():
+        if data.get("status") in ["training", "paused"]:
+            # If it's supposed to be running but we don't track it OR the tracked pid is gone
+            # Note: On server restart, active_processes is empty, so all "training" tasks 
+            # correctly get marked as stopped/interrupted.
+            if name not in active_processes:
+                if data["status"] != "interrupted":
+                     projects[name]["status"] = "interrupted"
+                     changed = True
+                     
+    if changed:
+        save_projects(projects)
+
 # Setup CORS
 app.add_middleware(
     CORSMiddleware,
@@ -33,9 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global process tracking
-active_processes = {}
 
 class TranscriptionRequest(BaseModel):
     file_path: Optional[str] = None
@@ -70,7 +100,72 @@ class HuggingFaceUploadRequest(BaseModel):
 
 @app.get("/projects")
 async def list_projects():
+    sync_project_status()
     return load_projects()
+
+@app.get("/system/stats")
+async def get_system_stats():
+    """Returns real-time system metrics (CPU, RAM, GPU)."""
+    
+    # CPU & RAM
+    cpu_percent = psutil.cpu_percent(interval=None)
+    mem = psutil.virtual_memory()
+    
+    stats = {
+        "cpu": {
+            "percent": cpu_percent,
+        },
+        "memory": {
+            "total_gb": round(mem.total / (1024**3), 1),
+            "used_gb": round(mem.used / (1024**3), 1),
+            "percent": mem.percent
+        },
+        "gpu": None
+    }
+    
+    # GPU (nvidia-smi for system-wide stats)
+    stats["gpus"] = []
+    try:
+        # Query: index, name, utilization.gpu, memory.total, memory.used
+        # Format: csv, no header, no units (returns pure numbers)
+        cmd = [
+            "nvidia-smi", 
+            "--query-gpu=index,name,utilization.gpu,memory.total,memory.used", 
+            "--format=csv,noheader,nounits"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                if not line: continue
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 5:
+                    idx, name, util, mem_total, mem_used = parts
+                    stats["gpus"].append({
+                        "index": int(idx),
+                        "name": name,
+                        "utilization_percent": float(util),
+                        "total_gb": round(float(mem_total) / 1024, 1), # MB to GB
+                        "used_gb": round(float(mem_used) / 1024, 1)    # MB to GB
+                    })
+    except Exception as e:
+        print(f"Error getting GPU stats via nvidia-smi: {e}")
+        # Fallback to torch if nvidia-smi fails but torch detects cuda
+        if not stats["gpus"] and torch.cuda.is_available():
+             try:
+                count = torch.cuda.device_count()
+                for i in range(count):
+                    props = torch.cuda.get_device_properties(i)
+                    stats["gpus"].append({
+                        "index": i,
+                        "name": torch.cuda.get_device_name(i),
+                        "total_gb": round(props.total_memory / (1024**3), 1),
+                        "utilization_percent": 0, # Cannot determine system util via torch
+                        "used_gb": 0
+                    })
+             except: pass
+            
+    return stats
 
 # ==================== RLCoder Repository Management ====================
 

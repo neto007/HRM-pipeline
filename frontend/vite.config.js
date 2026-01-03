@@ -18,6 +18,7 @@ export default defineConfig({
       '/repo': 'http://127.0.0.1:9007',
       '/logs': 'http://127.0.0.1:9007',
       '/migration': 'http://127.0.0.1:9007',
+      '/system': 'http://127.0.0.1:9007',
     },
   },
 })

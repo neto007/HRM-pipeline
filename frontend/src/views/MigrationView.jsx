@@ -72,7 +72,28 @@ const MigrationView = ({
                     {!migrationPlan || !migrationPlan.stats ? (
                         <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
                             <p>No plan loaded. Run Phase 1 analysis first.</p>
-                            <button className="primary-button" style={{ marginTop: '16px' }}>Run Analysis</button>
+                            <button
+                                className="primary-button"
+                                style={{
+                                    marginTop: '24px',
+                                    background: 'linear-gradient(135deg, var(--primary), var(--secondary))',
+                                    color: '#fff',
+                                    border: 'none',
+                                    padding: '12px 24px',
+                                    borderRadius: '10px',
+                                    cursor: 'pointer',
+                                    fontWeight: '600',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '8px',
+                                    boxShadow: '0 4px 15px rgba(139, 92, 246, 0.3)',
+                                    transition: 'transform 0.2s'
+                                }}
+                                onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
+                                onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                            >
+                                <Zap size={18} /> Run Analysis
+                            </button>
                         </div>
                     ) : (
                         <div>
