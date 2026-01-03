@@ -121,11 +121,21 @@ ipython_config.py
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
 
-# RLCoder
+# RLCoder & HRM Data
 l2j_pipeline/temp_repos/
 data/rlcoder_index/
+data/synth_dataset/
+data/golden_dataset/
+data/logs/
+data/tests/
+data/db.sqlite3
+data/migration_plan.json
 
-# Frontend
+# Model Artifacts
+outputs/
+wandb/
+
+# Node
 frontend/node_modules/
 frontend/dist/
 frontend/.env

@@ -142,8 +142,12 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         with torch.no_grad():
             self.q_head.weight.zero_()
             self.q_head.bias.fill_(-5)  # type: ignore
+            
+        # Context Embedding Fusion Layer
+        # Project 384-dim (from sentence-transformers) to Hidden Size
+        self.context_projection = nn.Linear(384, self.config.hidden_size)
 
-    def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
+    def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor, context_emb: Optional[torch.Tensor] = None):
         # Token embedding
         embedding = self.embed_tokens(input.to(torch.int32))
 
@@ -158,9 +162,19 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
             embedding = torch.cat((puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), dim=-2)
 
         # Position embeddings
-        if self.config.pos_encodings == "learned":
             # scale by 1/sqrt(2) to maintain forward variance
             embedding = 0.707106781 * (embedding + self.embed_pos.embedding_weight.to(self.forward_dtype))
+
+        # Semantic Fusion: Inject Context Embedding
+        if context_emb is not None:
+             # context_emb shape: [batch, 384] -> projected: [batch, hidden]
+             # Add to START of sequence (or all sequence, here adding to all via broadcasting)
+             projected_ctx = self.context_projection(context_emb.to(self.forward_dtype))
+             # Expand to seq length [batch, 1, hidden]
+             projected_ctx = projected_ctx.unsqueeze(1)
+             
+             # Fuse by addition (ResNet style)
+             embedding = embedding + projected_ctx
 
         # Scale
         return self.embed_scale * embedding
@@ -183,7 +197,8 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         )
 
         # Input encoding
-        input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        context_emb = batch.get("context_embeddings", None)
+        input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"], context_emb)
 
         # Forward iterations
         with torch.no_grad():

@@ -8,6 +8,17 @@ import argparse
 from pathlib import Path
 from typing import List, Dict
 from tqdm import tqdm
+import numpy as np
+
+# Try importing semantic search libs
+try:
+    from sentence_transformers import SentenceTransformer
+    import faiss
+    HAS_SEMANTIC = True
+except ImportError:
+    HAS_SEMANTIC = False
+    print("⚠️  Bibliotecas de IA não encontradas. Indexação será apenas por keywords.")
+
 
 
 def scan_java_files(repo_path: str) -> List[Dict]:
@@ -95,6 +106,37 @@ def build_simple_index(java_files: List[Dict]) -> Dict:
     return index
 
 
+def build_semantic_index(java_files: List[Dict], output_path: str):
+    """Gera embeddings e cria índice FAISS."""
+    if not HAS_SEMANTIC:
+        return
+        
+    print("\n[*] Gerando embeddings para busca semântica (pode demorar)...")
+    
+    # Modelo leve e rápido
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    # Preparar textos (Class + Methods signatures seria ideal, vamos usar os primeiros 512 tokens)
+    docs = [f['content'][:1024] for f in java_files]
+    
+    # Gerar embeddings
+    embeddings = model.encode(docs, show_progress_bar=True, batch_size=32)
+    
+    # Normalizar para cosseno
+    faiss.normalize_L2(embeddings)
+    
+    # Criar índice FAISS (Flat IP = Inner Product = Cosine Similarity após normalização)
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dimension)
+    index.add(embeddings)
+    
+    # Salvar índice FAISS separado
+    faiss_path = output_path.replace('.json', '.faiss')
+    faiss.write_index(index, faiss_path)
+    print(f"✅ Índice Semântico FAISS salvo: {faiss_path}")
+
+
+
 def save_index(index: Dict, output_path: str):
     """Salva o índice em disco."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -159,6 +201,11 @@ def main():
     
     # Salvar
     save_index(index, args.output)
+    
+    # Passo Extra: Construir Índice Semântico
+    if HAS_SEMANTIC:
+        build_semantic_index(java_files, args.output)
+
     
     print(f"\n🎯 Próximo passo: Use o índice em transcribe.py:")
     print(f"   from l2j_pipeline.rlcoder_adapter import RLCoderAdapter")

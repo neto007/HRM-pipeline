@@ -7,6 +7,13 @@ import json
 from typing import Dict, List, Optional
 from pathlib import Path
 
+try:
+    from sentence_transformers import SentenceTransformer
+    import faiss
+    import numpy as np
+    HAS_SEMANTIC = True
+except ImportError:
+    HAS_SEMANTIC = False
 
 class RLCoderAdapter:
     """
@@ -23,8 +30,26 @@ class RLCoderAdapter:
                        Se None, será usado o caminho padrão.
         """
         self.index_path = index_path or "data/rlcoder_index/l2j_index.json"
+        self.index_path = index_path or "data/rlcoder_index/l2j_index.json"
+        self.faiss_path = self.index_path.replace('.json', '.faiss')
         self.retriever = None
+        self.semantic_index = None
+        self.model = None
         self._load_retriever()
+        
+    def _load_semantic_model(self):
+        """Carrega modelo e índice FAISS se disponíveis."""
+        if not HAS_SEMANTIC: 
+            return
+            
+        if os.path.exists(self.faiss_path):
+            try:
+                print(f"[RLCoder] 🧠 Carregando índice semântico: {self.faiss_path}")
+                self.semantic_index = faiss.read_index(self.faiss_path)
+                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            except Exception as e:
+                print(f"[!] Falha ao carregar busca semântica: {e}")
+
     
     def _load_retriever(self):
         """Carrega o RLRetriever ou cria um mock se o índice não existir."""
@@ -46,6 +71,9 @@ class RLCoderAdapter:
             print(f"[RLCoder] Carregando índice: {self.index_path}")
             with open(self.index_path, 'r') as f:
                 self.index_data = json.load(f)
+            
+            # Tentar carregar semântico também
+            self._load_semantic_model()
         else:
             print(f"[RLCoder] ⚠️  Índice não encontrado. Usando modo simulado.")
             print(f"[RLCoder] Acesse Config e adicione um repositório")
@@ -66,19 +94,49 @@ class RLCoderAdapter:
                 - similarity_scores: Scores de similaridade
         """
         if self.index_data is None:
-            # Modo simulado (fallback)
-            return self._mock_retrieval(query_code, top_k)
+            # ERRO EXPLICITO - Nunca usar simulado!
+            raise RuntimeError(
+                "❌ RLCoder index not found!\n"
+                "You MUST add and index a repository first:\n"
+                "1. Go to Config tab\n"
+                "2. Add L2J repository\n"
+                "3. Click 'Index' (or wait for auto-indexing)\n"
+                "Context is REQUIRED for accurate migration."
+            )
         
         # Usar índice real para retrieval
         try:
-            results = self._real_retrieval(query_code, top_k)
+            if self.semantic_index:
+                 results = self._semantic_retrieval(query_code, top_k)
+            else:
+                 results = self._keyword_retrieval(query_code, top_k)
             return results
         except Exception as e:
-            print(f"[!] Erro no retrieval real: {e}")
-            return self._mock_retrieval(query_code, top_k)
+            print(f"[!] Erro no retrieval (fallback para keyword): {e}")
+            return self._keyword_retrieval(query_code, top_k)
     
-    def _real_retrieval(self, query_code: str, top_k: int) -> Dict:
-        """Retrieval usando índice real do L2J."""
+    def _semantic_retrieval(self, query_code: str, top_k: int) -> Dict:
+        """Retrieval usando Embeddings + FAISS."""
+        # Gerar embedding da query (usar apenas primeiros 512 chars para velocidade)
+        query_embedding = self.model.encode([query_code[:1024]])
+        faiss.normalize_L2(query_embedding)
+        
+        # Buscar no FAISS
+        scores, indices = self.semantic_index.search(query_embedding, top_k)
+        
+        relevant_files = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < len(self.index_data['files']):
+                file_info = self.index_data['files'][idx]
+                relevant_files.append({
+                    'file_info': file_info,
+                    'score': float(score)
+                })
+                
+        return self._format_results(relevant_files, "semantic")
+
+    def _keyword_retrieval(self, query_code: str, top_k: int) -> Dict:
+        """Retrieval legado usando Keywords (Backup)."""
         # Extrair palavras-chave do código de consulta
         keywords = set()
         for word in query_code.split():
@@ -114,9 +172,12 @@ class RLCoderAdapter:
                 for f in self.index_data['files'][:top_k]
             ]
         
+        return self._format_results(relevant_files, "keyword")
+        
+    def _format_results(self, relevant_files: List, mode: str) -> Dict:
         return {
             "relevant_code": [
-                f['file_info']['content'][:500] + "..."  # Preview de 500 chars
+                f['file_info']['content'][:800] + "..."  
                 for f in relevant_files
             ],
             "file_paths": [
@@ -124,10 +185,10 @@ class RLCoderAdapter:
                 for f in relevant_files
             ],
             "similarity_scores": [
-                min(f['score'] * 10, 1.0)  # Normalizar para 0-1
+                f['score']
                 for f in relevant_files
             ],
-            "mode": "real"  # Indicar que é contexto real
+            "mode": mode
         }
     
     def _mock_retrieval(self, query_code: str, top_k: int) -> Dict:

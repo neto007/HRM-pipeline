@@ -8,8 +8,10 @@ import torch
 from typing import List, Optional
 
 import json
+from l2j_pipeline.migration_api import router as migration_router
 
 app = FastAPI(title="HRM-Forge: Universal Training Hub")
+app.include_router(migration_router)
 
 # Project management
 PROJECTS_FILE = "hrm_projects.json"
@@ -175,8 +177,64 @@ async def get_index_status():
 
 @app.post("/transcribe")
 async def run_transcribe(req: TranscriptionRequest):
+    """Executa transcrição usando o HybridMigrationEngine real (HRM+LLM+RLCoder)."""
+    try:
+        # Configurar ambiente
+        if req.api_key:
+            os.environ["OPENROUTER_API_KEY"] = req.api_key
+            
+        # Mock override
+        if req.mock:
+            return {
+                "go_code": "// [MOCK] Transcrição simulada para " + req.target_lang,
+                "guidance": {"strategy": "MOCK Strategy"},
+                "reward": {"total": 0}
+            }
+
+        # Importar Engine Híbrido
+        import sys
+        cwd = os.getcwd()
+        if cwd not in sys.path:
+            sys.path.append(cwd)
+            
+        from l2j_pipeline.hybrid_migration_engine import HybridMigrationEngine
+        
+        print(f"[API] Initializing HybridEngine for single file: {req.model}")
+        engine = HybridMigrationEngine(
+            target_lang=req.target_lang,
+            model=req.model,
+            use_hrm_guidance=True
+        )
+        
+        # Arquivo dummy para análise AST
+        file_path = req.file_path or "StudioExperiment.java"
+        
+        # Gerar código
+        result = engine.generate_code(req.java_code, file_path)
+        
+        if not result["success"]:
+             raise HTTPException(status_code=500, detail=result.get("error", "Generation failed"))
+             
+        # Retornar estrutura rica para o Test Lab
+        return {
+            "go_code": result["code"],
+            "guidance": result.get("guidance"),
+            "reward": result.get("reward"),
+            "rlcoder_context": result.get("rlcoder_context")
+        }
+        
+    except Exception as e:
+        print(f"❌ Transcribe Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Legacy implementation kept for reference
+async def _legacy_transcribe(req: TranscriptionRequest):
+    """Executa transcrição usando o HybridMigrationEngine real (HRM+LLM+RLCoder)."""
     # Executa o script de transcrição via subprocesso e retorna a saída
     cmd = [".venv/bin/python", "l2j_pipeline/transcribe.py"]
+
     
     env = os.environ.copy()
     if req.api_key:
